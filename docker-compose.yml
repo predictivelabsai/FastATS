@@ -1,0 +1,54 @@
+services:
+  postgres:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: fastats
+      POSTGRES_USER: fastats
+      POSTGRES_PASSWORD: fastats
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U fastats"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    volumes:
+      - fastats-postgres:/var/lib/postgresql/data
+
+  app:
+    build: .
+    environment:
+      FASTATS_DATABASE_URL: postgresql://fastats:fastats@postgres:5432/fastats
+      FASTATS_DB_SCHEMA: fast_ats
+      FASTATS_SECRET: ${FASTATS_SECRET:-local-compose-secret}
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      MODEL_NAME: ${MODEL_NAME:-grok-4-1-fast-reasoning}
+      FASTATS_CHECKPOINTER: ${FASTATS_CHECKPOINTER:-postgres}
+      FASTATS_STORAGE_BACKEND: ${FASTATS_STORAGE_BACKEND:-local}
+      FASTATS_EMBEDDINGS_BACKEND: ${FASTATS_EMBEDDINGS_BACKEND:-fake}
+      EMBEDDINGS_API_KEY: ${EMBEDDINGS_API_KEY:-}
+      FASTATS_EMAIL_BACKEND: ${FASTATS_EMAIL_BACKEND:-console}
+      POSTMARK_API_TOKEN: ${POSTMARK_API_TOKEN:-}
+    ports:
+      - "5020:5020"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - fastats-uploads:/data/uploads
+
+  worker:
+    build: .
+    command: ["python", "worker.py"]
+    environment:
+      FASTATS_DATABASE_URL: postgresql://fastats:fastats@postgres:5432/fastats
+      FASTATS_DB_SCHEMA: fast_ats
+      XAI_API_KEY: ${XAI_API_KEY:-}
+      MODEL_NAME: ${MODEL_NAME:-grok-4-1-fast-reasoning}
+    depends_on:
+      postgres:
+        condition: service_healthy
+    volumes:
+      - fastats-uploads:/data/uploads
+
+volumes:
+  fastats-postgres:
+  fastats-uploads:
