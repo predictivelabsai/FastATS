@@ -10,13 +10,16 @@ from fasthtml.common import (
     Li, Main, Meta, Nav, Option, P, Pre, Script, Section, Select, Small, Span, Style,
     Table, Tbody, Td, Textarea, Th, Thead, Title, Tr, Ul, fast_app,
 )
-from starlette.responses import JSONResponse, RedirectResponse, Response
+from starlette.responses import JSONResponse, RedirectResponse, Response, StreamingResponse
 
 from agents import content
+from agents.recruiter import RecruiterContext, extract_artifact
+from agents.turn import stream_turn
 from analytics import AnalyticsService
 from ats import ATSService
 from auth import authenticate, google_identity
 from web import google_auth
+from chat import ChatService
 from config import settings
 from crm import CRMService
 from database import get_database
@@ -24,6 +27,7 @@ from documents import extract_text
 from interviews import InterviewService
 from seed import build
 from semantic import search_candidates
+from skills_service import SkillsService
 from storage import get_storage
 
 CSS = """
@@ -31,6 +35,26 @@ CSS = """
 *{box-sizing:border-box}body{margin:0;background:var(--bg);color:var(--ink);font:15px/1.45 Inter,ui-sans-serif,system-ui,sans-serif}
 a{color:inherit;text-decoration:none}button,.button{border:0;border-radius:8px;background:var(--brand);color:#fff;padding:.65rem .9rem;font-weight:650;cursor:pointer}
 button.secondary,.button.secondary{background:#fff;color:var(--ink);border:1px solid var(--line)}input,textarea,select{width:100%;padding:.7rem;border:1px solid #d9d6e2;border-radius:8px;background:#fff;font:inherit}textarea{min-height:120px}label{display:grid;gap:.35rem;font-weight:600;margin:.7rem 0}.shell{display:grid;grid-template-columns:220px 1fr;min-height:100vh}.sidebar{background:#19182a;color:#e9e8f5;padding:1.25rem}.brand{font-size:1.25rem;font-weight:800;margin-bottom:1.5rem}.sidebar a{display:block;padding:.65rem .75rem;border-radius:8px;color:#c9c6dd}.sidebar a:hover{background:#292741;color:#fff}.content{padding:2rem;max-width:1500px;width:100%;margin:auto}.top{display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem}.top h1{margin:0}.muted{color:var(--muted)}.grid{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:1rem}.card{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:1rem;box-shadow:0 1px 2px #1111}.metric{font-size:2rem;font-weight:800}.pipeline{display:grid;grid-template-columns:repeat(6,minmax(220px,1fr));gap:.8rem;overflow-x:auto;padding-bottom:1rem}.column{background:#eeedf4;border-radius:12px;padding:.7rem;min-height:240px}.column h3{display:flex;justify-content:space-between;margin:.3rem}.candidate{background:#fff;border:1px solid var(--line);border-radius:9px;padding:.75rem;margin:.65rem 0}.candidate form{margin-top:.65rem}.pill{display:inline-block;border-radius:999px;background:var(--soft);color:#4338a8;padding:.2rem .55rem;font-size:.8rem}.career{max-width:850px;margin:0 auto;padding:2rem}.career header{display:flex;justify-content:space-between;align-items:center}.split{display:grid;grid-template-columns:2fr 1fr;gap:1rem}.flash{padding:.8rem;border-radius:8px;background:#e9f8ef;color:#175d34}.danger{background:#fff0f0;color:#9b2424}.activity{border-left:2px solid var(--line);padding-left:1rem}.activity li{margin:.6rem 0}@media(max-width:850px){.shell{grid-template-columns:1fr}.sidebar{display:none}.grid,.split{grid-template-columns:1fr}.content{padding:1rem}}
+.sidebar a.primary{background:var(--brand);color:#fff;font-weight:700;margin-bottom:.5rem}
+.chatwrap{display:grid;grid-template-columns:1fr 380px;height:100vh}
+.chatmain{display:flex;flex-direction:column;height:100vh;background:var(--bg)}
+.chathead{padding:1rem 1.5rem;border-bottom:1px solid var(--line);background:#fff;display:flex;justify-content:space-between;align-items:center}
+.stream{flex:1;overflow-y:auto;padding:1.5rem;display:flex;flex-direction:column;gap:1rem}
+.msg{max-width:760px;padding:.85rem 1.05rem;border-radius:14px;white-space:pre-wrap;line-height:1.5}
+.msg.user{align-self:flex-end;background:var(--brand);color:#fff;border-bottom-right-radius:4px}
+.msg.assistant{align-self:flex-start;background:#fff;border:1px solid var(--line);border-bottom-left-radius:4px}
+.msg.tool{align-self:flex-start;background:transparent;color:var(--muted);font-size:.85rem;padding:.2rem .4rem}
+.composer{border-top:1px solid var(--line);background:#fff;padding:1rem 1.5rem;display:flex;gap:.6rem}
+.composer textarea{min-height:52px;max-height:180px;resize:none}
+.canvas{border-left:1px solid var(--line);background:#fff;overflow-y:auto;padding:1.25rem}
+.canvas h3{margin-top:0}
+.acard{border:1px solid var(--line);border-radius:11px;padding:.85rem;margin-bottom:.8rem}
+.acard h4{margin:.1rem 0 .5rem}
+.empty{color:var(--muted);text-align:center;margin-top:3rem}
+.suggest{display:flex;flex-wrap:wrap;gap:.5rem;margin-top:1rem}
+.suggest button{background:#fff;color:var(--ink);border:1px solid var(--line);font-weight:500}
+.threadlist a{font-size:.9rem;padding:.5rem .6rem;white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+@media(max-width:900px){.chatwrap{grid-template-columns:1fr}.canvas{display:none}}
 """
 
 db = get_database()
@@ -40,6 +64,8 @@ ats = ATSService(db)
 crm = CRMService(db)
 interviews = InterviewService(db)
 analytics = AnalyticsService(db)
+chat = ChatService(db)
+skills = SkillsService(db)
 storage = get_storage()
 app, rt = fast_app(live=False, pico=False, secret_key=settings.secret,
                    hdrs=[Title("FastATS"), Meta(name="viewport", content="width=device-width,initial-scale=1"), Style(CSS)])
@@ -47,11 +73,13 @@ app, rt = fast_app(live=False, pico=False, secret_key=settings.secret,
 
 def shell(session, active: str, *content):
     user = session.get("identity", {})
-    nav = [("Dashboard", "/"), ("Jobs", "/jobs"), ("Candidates", "/candidates"),
+    nav = [("Dashboard", "/dashboard"), ("Jobs", "/jobs"), ("Candidates", "/candidates"),
            ("Search", "/search"), ("Pools", "/pools"), ("Sequences", "/sequences"),
-           ("Assistant", "/assistant"), ("Analytics", "/analytics"), ("Careers", "/careers")]
+           ("Skills", "/skills"), ("Analytics", "/analytics"), ("Careers", "/careers")]
+    links = [A("💬 Chat with Ada", href="/", cls="primary")]
+    links += [A(label, href=href) for label, href in nav]
     return Div(
-        Aside(Div("FastATS", cls="brand"), Nav(*[A(label, href=href) for label, href in nav]),
+        Aside(Div("FastATS", cls="brand"), Nav(*links),
               Small(user.get("organization_name", "")), cls="sidebar"),
         Main(*content, cls="content"), cls="shell")
 
@@ -122,7 +150,254 @@ def post(session):
     return RedirectResponse("/login", status_code=303)
 
 
+CHAT_JS = """
+const TID = window.__TID__;
+function el(h){const t=document.createElement('template');t.innerHTML=h.trim();return t.content.firstChild;}
+function esc(s){return (s||'').replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));}
+const stream=document.getElementById('stream'), canvas=document.getElementById('canvas');
+function scr(){stream.scrollTop=stream.scrollHeight;}
+function addMsg(role,text){const d=el('<div class="msg '+role+'"></div>');d.textContent=text;stream.appendChild(d);scr();return d;}
+function renderArtifact(a){
+  const c=el('<div class="acard"></div>'); let h='<h4>'+esc(a.title||a.kind)+'</h4>';
+  if(a.kind==='candidates'){h+=(a.candidates||[]).map(x=>'<div><a href="/candidates/'+x.id+'">'+esc(x.name)+'</a> — '+esc(x.headline)+'</div>').join('')||'None';}
+  else if(a.kind==='jobs'){h+=(a.jobs||[]).map(x=>'<div><a href="/jobs/'+x.id+'">'+esc(x.title)+'</a> ('+esc(x.status)+') — '+x.applications+'</div>').join('');}
+  else if(a.kind==='pipeline'){h+=(a.stages||[]).map(x=>'<div>'+esc(x.stage)+': <b>'+x.count+'</b></div>').join('');}
+  else if(a.kind==='candidate'){h+='<div><a href="/candidates/'+a.candidate_id+'">Open profile</a></div>'+(a.applications||[]).map(x=>'<div class="muted">'+esc(x.job)+' @ '+esc(x.stage)+'</div>').join('');}
+  else if(a.kind==='draft'){h+='<textarea style="width:100%;min-height:150px">'+esc(a.body)+'</textarea><p class="muted">Review, then send from the candidate page.</p>';}
+  else if(a.kind==='confirm'){var f='<form method="post" action="'+a.url+'">';const fl=a.fields||{};for(const k in fl){f+='<input type="hidden" name="'+k+'" value="'+esc(String(fl[k]))+'">';}f+='<button>'+esc(a.label||'Confirm')+'</button></form>';h+='<p>'+esc(a.text||'')+'</p>'+f;}
+  else {h+='<p>'+esc(a.text||'')+'</p>';}
+  c.innerHTML=h; const e=canvas.querySelector('.empty'); if(e)e.remove(); canvas.prepend(c);
+}
+async function send(text){
+  text=(text||'').trim(); if(!text)return;
+  addMsg('user',text); document.getElementById('box').value='';
+  const bubble=addMsg('assistant',''); let acc='';
+  let res; try{res=await fetch('/chat/'+TID+'/message',{method:'POST',headers:{'Content-Type':'application/x-www-form-urlencoded'},body:'message='+encodeURIComponent(text)});}
+  catch(e){bubble.textContent='Network error.';return;}
+  const reader=res.body.getReader(), dec=new TextDecoder(); let buf='';
+  while(true){const r=await reader.read(); if(r.done)break; buf+=dec.decode(r.value,{stream:true});
+    let i; while((i=buf.indexOf('\\n\\n'))>=0){const raw=buf.slice(0,i); buf=buf.slice(i+2);
+      if(!raw.startsWith('data:'))continue; let ev; try{ev=JSON.parse(raw.slice(5).trim());}catch(e){continue;}
+      if(ev.event==='token'){acc+=ev.data; bubble.textContent=acc; scr();}
+      else if(ev.event==='tool_start'){stream.insertBefore(el('<div class="msg tool">⚙ using '+esc(ev.data.name)+'…</div>'),bubble); scr();}
+      else if(ev.event==='artifact'){renderArtifact(ev.data);}
+      else if(ev.event==='error'){acc+='\\n['+ev.data.message+']'; bubble.textContent=acc;}
+    }
+  }
+}
+document.getElementById('composer').addEventListener('submit',e=>{e.preventDefault();send(document.getElementById('box').value);});
+document.getElementById('box').addEventListener('keydown',e=>{if(e.key==='Enter'&&!e.shiftKey){e.preventDefault();send(e.target.value);}});
+document.querySelectorAll('.suggest button').forEach(b=>b.addEventListener('click',()=>send(b.textContent)));
+"""
+
+SUGGESTIONS = ["Who are my strongest backend candidates?", "Summarize the pipeline for each job",
+               "Draft outreach to a promising candidate", "What should I focus on today?"]
+
+
+def ensure_skills(organization_id: str, user_id: str | None) -> None:
+    if not skills.skills(organization_id):
+        skills.seed_builtins(organization_id, user_id)
+
+
+def chat_page(session, thread: dict):
+    me = identity(session)
+    threads = chat.threads(me["organization_id"])
+    left = Aside(Div("FastATS", cls="brand"),
+        Form(Button("+ New chat", cls="secondary"), method="post", action="/chat/new"),
+        Nav(*[A("💬 " + (t["title"] or "Conversation"),
+                href=f"/chat/{t['id']}") for t in threads], cls="threadlist"),
+        Small("Workspace", cls="muted", style="display:block;margin-top:1rem"),
+        Nav(A("Dashboard", href="/dashboard"), A("Jobs", href="/jobs"), A("Candidates", href="/candidates"),
+            A("Search", href="/search"), A("Pools", href="/pools"), A("Sequences", href="/sequences"),
+            A("Skills", href="/skills"), A("Analytics", href="/analytics")),
+        Small(me.get("organization_name", ""), style="margin-top:1rem;display:block"),
+        cls="sidebar")
+
+    bubbles = []
+    for m in thread["messages"]:
+        if m["role"] in ("user", "assistant"):
+            bubbles.append(Div(m["content"], cls=f"msg {m['role']}"))
+    if not bubbles:
+        bubbles = [Div(H2("Hi, I'm Ada — your recruiting agent."),
+                       P("Ask me to find candidates, summarize pipelines, draft outreach, or propose next steps. "
+                         "I'll act through the whole app, and ask you to confirm anything that changes state.", cls="muted"),
+                       Div(*[Button(s) for s in SUGGESTIONS], cls="suggest"), cls="empty")]
+
+    center = Div(
+        Div(H3(thread["title"] or "New conversation"),
+            A("Skills", href="/skills", cls="button secondary"), cls="chathead"),
+        Div(*bubbles, id="stream", cls="stream"),
+        Form(Textarea(name="message", id="box", placeholder="Message Ada…  (Enter to send, Shift+Enter for newline)"),
+             Button("Send"), id="composer", cls="composer"),
+        cls="chatmain")
+    canvas = Div(Div("Results and proposed actions appear here.", cls="empty"), id="canvas", cls="canvas")
+    return Div(Div(left, center, canvas, cls="chatwrap"),
+               Script(f"window.__TID__ = {json.dumps(thread['id'])};"),
+               Script(CHAT_JS))
+
+
 @rt("/")
+def get(session):
+    denied = guard(session)
+    if denied:
+        return denied
+    me = identity(session)
+    org = me["organization_id"]
+    ensure_skills(org, me["user_id"])
+    latest = chat.threads(org, limit=1)
+    thread_id = latest[0]["id"] if latest else chat.create_thread(org, me["user_id"])
+    return chat_page(session, chat.thread(org, thread_id))
+
+
+@rt("/chat/{thread_id}")
+def get(session, thread_id: str):
+    denied = guard(session)
+    if denied:
+        return denied
+    me = identity(session)
+    thread = chat.thread(me["organization_id"], thread_id)
+    if not thread:
+        return Response("Not found", status_code=404)
+    return chat_page(session, thread)
+
+
+@rt("/chat/new")
+def post(session):
+    denied = guard(session)
+    if denied:
+        return denied
+    me = identity(session)
+    thread_id = chat.create_thread(me["organization_id"], me["user_id"])
+    return RedirectResponse(f"/chat/{thread_id}", status_code=303)
+
+
+@rt("/chat/{thread_id}/message")
+async def post(session, thread_id: str, message: str = ""):
+    denied = guard(session)
+    if denied:
+        return denied
+    me = identity(session)
+    org = me["organization_id"]
+    thread = chat.thread(org, thread_id)
+    if not thread:
+        return Response("Not found", status_code=404)
+    text = (message or "").strip()
+    if not text:
+        return Response("empty", status_code=400)
+    history = list(thread["messages"])
+    chat.add_message(org, thread_id, "user", text)
+    chat.rename_from_first_message(org, thread_id, text)
+    ctx = RecruiterContext(db, org, me["role"])
+
+    async def gen():
+        async for frame in stream_turn(ctx, text, history):
+            yield frame
+            try:
+                payload = json.loads(frame[len("data: "):].strip())
+                if payload.get("event") == "done":
+                    data = payload["data"]
+                    chat.add_message(org, thread_id, "assistant",
+                                     data.get("text", ""), data.get("artifacts") or None)
+            except Exception:
+                pass
+
+    return StreamingResponse(gen(), media_type="text/event-stream",
+                             headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"})
+
+
+@rt("/skills")
+def get(session):
+    denied = guard(session)
+    if denied:
+        return denied
+    me = identity(session)
+    org = me["organization_id"]
+    ensure_skills(org, me["user_id"])
+    rows = skills.skills(org)
+    cards = []
+    for s in rows:
+        toggle = "Disable" if s["enabled"] else "Enable"
+        controls = [Form(Button(toggle, cls="secondary"), method="post", action=f"/skills/{s['id']}/toggle"),
+                    A("Edit", href=f"/skills/{s['id']}", cls="button secondary")]
+        if not s["is_builtin"]:
+            controls.append(Form(Button("Delete", cls="secondary"), method="post", action=f"/skills/{s['id']}/delete"))
+        cards.append(Article(H3(s["name"], Span(" · on" if s["enabled"] else " · off", cls="muted")),
+            P(s["description"], cls="muted"),
+            Small(f"Triggers: {s['triggers'] or '—'}", cls="muted"),
+            Div(*controls, style="display:flex;gap:.5rem;margin-top:.6rem"), cls="card"))
+    form = Article(H3("Create a skill"),
+        Form(Label("Name", Input(name="name", required=True)),
+             Label("Description", Input(name="description")),
+             Label("Instructions (the agent follows these)", Textarea(name="instructions", required=True)),
+             Label("Trigger keywords (comma-separated)", Input(name="triggers")),
+             Button("Add skill"), method="post", action="/skills"), cls="card")
+    return shell(session, "skills", H1("Editable skills"),
+        P("Skills are playbooks that shape how Ada works. Enabled skills are added to her instructions; "
+          "triggers surface a skill when your message matches. Edit them freely — no code needed.", cls="muted"),
+        form, Div(*cards, cls="grid"))
+
+
+@rt("/skills")
+def post(session, name: str, instructions: str, description: str = "", triggers: str = ""):
+    denied = guard(session)
+    if denied:
+        return denied
+    me = identity(session)
+    skills.create_skill(me["organization_id"], name=name, description=description,
+                        instructions=instructions, triggers=triggers, created_by=me["user_id"])
+    return RedirectResponse("/skills", status_code=303)
+
+
+@rt("/skills/{skill_id}")
+def get(session, skill_id: str):
+    denied = guard(session)
+    if denied:
+        return denied
+    me = identity(session)
+    s = skills.skill(me["organization_id"], skill_id)
+    if not s:
+        return Response("Not found", status_code=404)
+    return shell(session, "skills", H1(f"Edit skill · {s['name']}"),
+        Article(Form(Label("Name", Input(name="name", value=s["name"], required=True)),
+            Label("Description", Input(name="description", value=s["description"])),
+            Label("Instructions", Textarea(s["instructions"], name="instructions", required=True)),
+            Label("Trigger keywords", Input(name="triggers", value=s["triggers"] or "")),
+            Button("Save"), method="post", action=f"/skills/{skill_id}"), cls="card"),
+        P(A("← Back to skills", href="/skills"), cls="muted"))
+
+
+@rt("/skills/{skill_id}")
+def post(session, skill_id: str, name: str, instructions: str, description: str = "", triggers: str = ""):
+    denied = guard(session)
+    if denied:
+        return denied
+    me = identity(session)
+    skills.update_skill(me["organization_id"], skill_id, name=name, description=description,
+                       instructions=instructions, triggers=triggers)
+    return RedirectResponse("/skills", status_code=303)
+
+
+@rt("/skills/{skill_id}/toggle")
+def post(session, skill_id: str):
+    denied = guard(session)
+    if denied:
+        return denied
+    me = identity(session)
+    skills.toggle(me["organization_id"], skill_id)
+    return RedirectResponse("/skills", status_code=303)
+
+
+@rt("/skills/{skill_id}/delete")
+def post(session, skill_id: str):
+    denied = guard(session)
+    if denied:
+        return denied
+    me = identity(session)
+    skills.delete_skill(me["organization_id"], skill_id)
+    return RedirectResponse("/skills", status_code=303)
+
+
+@rt("/dashboard")
 def get(session):
     denied = guard(session)
     if denied:
@@ -539,19 +814,9 @@ def get(session):
 
 
 @rt("/assistant")
-def get(session, q: str = ""):
-    denied = guard(session)
-    if denied:
-        return denied
-    answer = None
-    if q:
-        answer = _assistant_answer(session, q)
-    return shell(session, "assistant", H1("Recruiting assistant"),
-        P("Ask about candidates, pipelines, or draft outreach. The assistant is read-only — "
-          "it never moves stages or sends email.", cls="muted"),
-        Form(Textarea(name="q", placeholder="e.g. Who are my strongest backend candidates?", value=q or ""),
-             Button("Ask"), method="get", action="/assistant"),
-        Article(H3("Answer"), Pre(answer), cls="card") if answer is not None else None)
+def get(session):
+    # The assistant is now the primary chat surface at /.
+    return RedirectResponse("/", status_code=303)
 
 
 @rt("/tools/content")
@@ -582,22 +847,6 @@ def _generate_content(kind: str, title: str, notes: str) -> str:
         return content.generate_job_description(model, title=title, notes=notes)
     except Exception as exc:
         return f"Generation error: {exc}"
-
-
-def _assistant_answer(session, question: str) -> str:
-    me = identity(session)
-    if not settings.xai_api_key:
-        return ("The assistant needs XAI_API_KEY configured to run. Add it to .env and restart. "
-                "Search and analytics work without it.")
-    try:
-        from agents.assistant import AssistantContext, build_assistant_graph
-        from agents.models import build_chat_model
-        graph = build_assistant_graph(build_chat_model(), AssistantContext(db, me["organization_id"]))
-        result = graph.invoke({"messages": [{"role": "user", "content": question}]})
-        messages = result.get("messages", [])
-        return getattr(messages[-1], "content", str(messages[-1])) if messages else "(no answer)"
-    except Exception as exc:
-        return f"Assistant error: {exc}"
 
 
 if __name__ == "__main__":

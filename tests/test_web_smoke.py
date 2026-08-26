@@ -48,11 +48,34 @@ def test_public_careers_lists_seeded_jobs(client):
 
 def test_authenticated_surfaces_render(client):
     tc, _ = client
-    assert login(tc if False else client).status_code == 303
-    for path in ["/", "/search", "/pools", "/sequences", "/analytics", "/assistant",
-                 "/tools/content", "/candidates", "/jobs"]:
+    assert login(client).status_code == 303
+    for path in ["/", "/dashboard", "/search", "/pools", "/sequences", "/analytics",
+                 "/skills", "/tools/content", "/candidates", "/jobs"]:
         response = tc.get(path)
         assert response.status_code == 200, f"{path} -> {response.status_code}"
+
+
+def test_chat_home_and_skills(client):
+    tc, _ = client
+    login(client)
+    home = tc.get("/")
+    assert "Ada" in home.text and "Message Ada" in home.text
+    # Built-in skills are seeded lazily and listed.
+    sk = tc.get("/skills")
+    assert "Shortlist builder" in sk.text and "Editable skills" in sk.text
+
+
+def test_chat_message_streams_without_key(client):
+    tc, web_app = client
+    login(client)
+    org = web_app.identity({"identity": None}) or None
+    # Start a fresh thread and post a message; without a model key we get the
+    # graceful fallback via SSE, and the turn is persisted.
+    new = tc.post("/chat/new", follow_redirects=False)
+    thread_id = new.headers["location"].rsplit("/", 1)[-1]
+    resp = tc.post(f"/chat/{thread_id}/message", data={"message": "hello"})
+    assert resp.status_code == 200
+    assert "event" in resp.text and "done" in resp.text
 
 
 def test_pool_and_search_flow(client):
