@@ -19,7 +19,12 @@ from embeddings import Embedder, cosine_similarity, get_embedder
 def index_entity(db: Database, organization_id: str, entity_type: str, entity_id: str,
                  text: str, *, embedder: Embedder | None = None) -> None:
     embedder = embedder or get_embedder()
-    vector = embedder.embed_one(text or "")
+    try:
+        vector = embedder.embed_one(text or "")
+    except Exception:
+        # A misconfigured/expired hosted key must not crash the worker; skip
+        # indexing and let search fall back to keyword matching.
+        return
     now = utcnow()
     existing = db.one("""SELECT id FROM embeddings
         WHERE entity_type=? AND entity_id=? AND model=?""",
@@ -45,7 +50,12 @@ def search(db: Database, organization_id: str, entity_type: str, query: str,
            *, limit: int = 10, embedder: Embedder | None = None) -> list[dict]:
     """Return [{entity_id, score}] ranked by similarity to the query."""
     embedder = embedder or get_embedder()
-    query_vector = embedder.embed_one(query or "")
+    try:
+        query_vector = embedder.embed_one(query or "")
+    except Exception:
+        # Hosted embeddings unavailable (bad key, network) — signal the caller to
+        # use keyword fallback rather than raising into the agent/chat.
+        return []
 
     if db.dialect == "postgres" and entity_type in ("candidate", "document"):
         table = "candidates" if entity_type == "candidate" else "documents"

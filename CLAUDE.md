@@ -69,6 +69,14 @@ The system stays zero-config in dev and keyless in tests by putting every extern
 
 When adding an AI/IO feature, follow this seam: take the collaborator as an argument, default it to the configured real one, and inject a fake in tests.
 
+### Chat-first UX (the primary surface)
+The single chat agent **"Ada"** is the landing surface at `/` and drives the whole app (the dashboard moved to `/dashboard`). It's a 3-pane FastHTML page (`chat_page` in `web_app.py`): left = threads + workspace nav, center = streaming messages, right = an **artifact canvas**. Streaming uses **SSE**: `POST /chat/{thread_id}/message` returns `text/event-stream`; `agents/turn.py::stream_turn` maps LangGraph `astream_events` to `token` / `tool_start` / `artifact` / `done` events, and the inline `CHAT_JS` client renders them (tokens into the bubble, artifacts into the canvas). Tools emit an `__ARTIFACT__{json}` sentinel (`agents/recruiter.py::_artifact` / `extract_artifact`) rendered by `kind` (candidates, jobs, pipeline, candidate, draft, confirm, info). Threads/messages persist via `ChatService` (`chat.py`). Without a model key the chat still loads and returns a graceful fallback message.
+
+**Recruiter agent** (`agents/recruiter.py`): a `create_react_agent` over read tools (search_candidates, get_candidate, list_jobs, summarize_pipeline, draft_outreach, queue_screening) plus **`propose_*` tools that never mutate state** — they return a `confirm` artifact whose form POSTs to the existing human-gated routes (e.g. `/applications/{id}/stage`). This is how the chat "drives everything" while keeping the safety model: the agent proposes, a human confirms.
+
+### Editable skills (`skills_service.py`, `skills` table)
+Recruiter-authored playbooks — name + instructions + trigger keywords + optional tool allow-list — stored per org and **composed into the agent's system prompt at runtime** (`SkillsService.compose_system_prompt`, called from `agents/recruiter.py::system_prompt_for`). Triggers matching the user's message mark a skill active. Full CRUD UI at `/skills`; built-in starter skills are seeded per org (lazily via `ensure_skills`, so existing orgs get them too). This is FastATS's own invention — the reference app (carhero) has no editable-skills feature; the injection seam is the agent's system prompt.
+
 ### Agent layer (`agents/`, LangGraph)
 All AI runs through compiled LangGraph graphs; each accepts an injected model/evaluator so tests drive real graph topology with a scripted fake:
 - `screening_graph.py` — `build_screening_graph(evaluator)`: prepare → score. `screening.py` loads context, runs the graph, and persists `screening_runs`/`screening_criteria`. **Still assistive-only: it never mutates application state.**
