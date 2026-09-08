@@ -1,3 +1,4 @@
+from web.landing import landing_page
 """FastHTML routes for the FastATS recruiter and public career surfaces."""
 from __future__ import annotations
 
@@ -238,6 +239,8 @@ def chat_page(session, thread: dict):
 
 @rt("/")
 def get(session):
+    if not identity(session):
+        return landing_page()
     denied = guard(session)
     if denied:
         return denied

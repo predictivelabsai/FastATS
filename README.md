@@ -31,3 +31,6 @@ AI screening only extracts evidence and records scores, explanations, gaps, and
 a recommendation. It cannot reject, advance, offer, or otherwise change an
 application. Those state transitions remain explicit human actions.
 
+## Public landing
+
+`web/landing.py` provides a FastHTML marketing landing (including Pricing: BYOC free / Host with us €1/month). Wire `landing_page` to the public `/` route once the app shell exists.
